@@ -1,0 +1,9 @@
+base
+stargazer
+ggplot2
+dplyr
+corrplot
+gganimate
+zoo
+bindrcpp
+gapminder

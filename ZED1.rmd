@@ -1,0 +1,144 @@
+---
+title: "ZED1"
+author: "Konrad Matusiak"
+date: '`r format(Sys.Date(), "%d %B %Y")`'
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r import, cache=FALSE, include=FALSE}
+dane_klas <- read.csv("elektrownie.csv", nrows = 1000)
+klasy <- sapply(dane_klas, class)
+dane <- read.csv("elektrownie.csv", colClasses = klasy,row.names=1)
+dane$data <- as.POSIXct(dane$data, format="%m/%d/%Y %H:%M")
+```
+```{r libraries, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+library(stargazer)
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+library(plotly)
+library(caret)
+```
+# Wstêp
+
+Celem tego raportu jest zbadanie, które atrybuty dostarczonego zbioru danych maj¹ najwiêkszy wp³yw na iloœæ wyprodukowanej energii przez panele fotowoltaiczne. Taka analiza, mo¿e usprawniæ gospodarowanie energi¹ np. w zale¿noœci od pory roku, lub godzin w trakcie dnia. Z przeprowadzonych badañ wynika, ¿e najwa¿niejszymi atrybutami s¹ nas³onecznienie, zachmurzenie i wilgotnoœæ.	
+
+#Atrybuty i zbiór danych
+
+Dostarczony zbiór danych zawiera `r nrow(dane)` obserwacji oraz `r ncol(dane)` atrybutów. 
+
+```{r statystyki, results='asis', echo= FALSE}
+stargazer(dane, type = "html")
+
+```
+
+# Podzia³ atrybutów
+
+Atrybuty z powy¿szej tabeli mo¿na podzieliæ na szeœæ grup:
+
+1. dotycz¹ce czujników, takie jak identyfikator, marka, model, czy wiek. Cechy czujników zosta³y znormalnizowane do przedzia³u <0,1>.
+2. dotycz¹ce obserwacji, id obserwacji, rok(anno), dzieñ(day), godzina(ora), ³añcuch znaków data zawieraj¹cy datê oraz godzinie w formie zrozumia³ej dla cz³owieka, a tak¿e szerokoœæ(lat) i d³ugoœæ(lon) geograficzn¹ obserwacji.
+3. Dotycz¹ce warunków atmosferycznych: atrybut icon (7 ró¿nych wartoœci) sugeruje, ¿e dane pogodowe mog³y zostaæ pobrane z zewnêtrznego serwisu, a icon jest ikonk¹ pogody w danej chwili. Dodatkowo w zbiorze znajduj¹ siê bardziej szczegó³owe cechy stanu pogody: temperatura powietrza, nas³onecznienie, ciœnienie atmosferyczne, prêdkoœæ wiatru, wilgotnoœæ, temp pkt rosy, zachmurzenie. Nas³onecznienie wystêpuje dwa razy, jedna wartoœæ zosta³a odczytana przez czujnik, a druga prawdopodobnie dostarczona przez serwis pogodowy.
+4. Dotycz¹ce po³o¿enia s³oñca: azymut, wysokoœæ (S³oñca nad horyzontem), dist - prawdopodobnie odleg³oœæ S³oñca od Ziemi.
+5. Dotycz¹ce autokorelacji przestrzennej: 15 atrybutów pcnm (Principal coordinates of neighbour matrices), dziêki czemu mo¿na rozwa¿aæ korelacjê przestrzenn¹ czujników. Atrybuty *i: prawdopodobnie wyliczone na podstawie pcnm, w celu zminimalizowania wp³ywu autokorelacji przestrzennej, znaczenie tych zmiennych jest identyczne z wy¿ej wymienionymi.
+6. Iloœæ wyprodukowanej energii 
+```{r kwh, echo=FALSE}
+lapply(dane["kwh"], summary)
+```
+
+# Wykres wytwarzanej energii przez czujniki
+
+```{r wykres_inter, fig.width=9, fig.height=7, fig.align='center', echo=FALSE}
+interaktywny_wykres_1 <-  dane[complete.cases(dane), ] %>% mutate(month_year = format(as.POSIXct(data), "%Y/%m")) %>% group_by(idsito, month_year) %>% summarise(sum_of_kwh = sum(kwh))
+plot <- ggplot() + geom_line(data=interaktywny_wykres_1, aes(x=month_year, y=sum_of_kwh, group=idsito, color=factor(x = 1*idsito, labels=c(1:17)))) + labs(color="Legenda") + labs(title="Produkcja energi poszczególnych czujników w czasie", x="rok/miesi¹c", y="suma kwh") +
+theme(axis.text.x=element_text(angle=90, vjust=0.5), axis.title.x = element_text(vjust=2.5))
+ggplotly(plot)
+```
+
+Analizuj¹c wykres mo¿na zauwa¿yæ, ¿e czujnik nr 10 wykazuje znacz¹co wy¿sz¹ produkcjê od pozosta³ych w 2012. Prawdopodobnie b³êdny odczyt. Czujniki ulegaj¹ awarii, miejsca awarii to gwa³towne spadki wyprodukowanej energii do 0, gdy pozosta³e czujniki utrzymuj¹ wy¿sze wartoœci.
+
+#Brakuj¹ce dane
+
+Podczas analizy okaza³o siê, ¿e zbiór zawiera b³êdy: <br>
+1. `r sum(is.na(dane))` daty zosta³y Ÿle zapisane po konwersji na POSIXct, usuniête ze wzglêdu na ma³¹ liczbê obserwacji. <br>
+2. zerowa energia przy nie zerowym nas³onecznieniu, takie wartoœci zosta³y poprawione przy u¿yciu œredniej wartoœæi energii z danej godziny w tygodniu wyst¹pienia. <br>
+3. niezerowa energia przy zerowym nas³onecznieniu, poprawione za pomoc¹ œredniego nas³onecznienia z danej godziny w tygodniu wyst¹pienia.
+
+```{r data_repair, warning=FALSE, echo=FALSE}
+dane_oczyszczone <- dane[complete.cases(dane), ] %>% mutate(week = strftime(data, format="%W")) %>% mutate(month = strftime(data, format="%m"))
+dane_oczyszczone <- dane_oczyszczone %>% group_by(idsito, anno, week, ora) %>% mutate(kwh = ifelse(kwh == 0 & (irradiamento > 0 | irr_pvgis_mod > 0), mean(kwh), kwh))
+dane_oczyszczone <- dane_oczyszczone %>% group_by(idsito, anno, week, ora) %>% mutate(irradiamento = ifelse(irradiamento == 0 && kwh > 0, mean(irradiamento), irradiamento))
+dane_oczyszczone <- dane_oczyszczone %>% group_by(idsito, anno, week, ora) %>% mutate(irr_pvgis_mod = ifelse(irr_pvgis_mod == 0 && kwh > 0, mean(irradiamento), irradiamento))
+```
+
+# Korelacja
+```{r korelacja,echo=FALSE,fig.width=20,fig.height=15}
+tabela_korelacji <- cor(dane %>% select(-data))
+corrplot(tabela_korelacji, type = "upper", order = "hclust", 
+          tl.col = "black", tl.srt = 45)
+```
+
+
+Na podstawie powy¿szego wykresu mo¿na zauwa¿yæ ze moc elektrowni(kwh) jest silnie dodatnio skorelowana z nas³onecznieniem. Jest to jak najbardziej logiczne, im wiêcej œwiat³a s³onecznego tym wiêcej energii panele s³oneczne s¹ w stanie wyprodukowaæ. Wilgotnoœæ jest negatywnie skorelowana z nas³onecznieniem i moc¹ elektrowni - zachmurzenie i opady deszczu ograniczaj¹ iloœæ œwiat³a doceriaj¹cego do ogniw fotowoltaicznych.
+
+
+
+# Regresory
+```{r regessor_creation, warning=FALSE, echo=FALSE, message=FALSE, error=FALSE, include=FALSE}
+dane_oczyszczone <- dane_oczyszczone %>% select(-c(data, month, week))
+dane_oczyszczone <- dane_oczyszczone %>% filter(idsito != 0.25 & idsito != 0.4) #usuniêcie pomiarów z wadliwych
+
+
+set.seed(23) #powtarzalnoœæ wyników
+
+inTraining <-
+    createDataPartition(
+        y = dane_oczyszczone$kwh,
+        p = .75,
+        list = FALSE)
+
+training <- dane_oczyszczone[ inTraining,]
+testing  <- dane_oczyszczone[-inTraining,]
+
+ctrl <- trainControl(
+    method = "cv",
+    number = 2,
+    repeats = 5)
+
+
+fitLM <- train(kwh ~ .,
+             data = training,
+             method = "lm",
+             trControl = ctrl)
+
+fitLARS<- train(kwh ~ .,
+             data = training,
+             method = "lars",
+             trControl = ctrl)#Least Angle Regression
+
+fitLF <- train(kwh ~ .,
+             data = training,
+             method = "leapForward",
+             trControl = ctrl)
+
+#fitLM$results$RMSE
+#fitLARS$results$RMSE
+#fitLF$results$RMSE
+```
+
+Przed stworzeniem modelu regresji, usuniêto ze zbioru danych obserwacje wadliwych czujników, aby wyniki by³y jak najdok³adniejsze.
+Stworzono 3 modele za pomoc¹ nastêpuj¹cych algorytmów (nazwa: b³¹d œredniokwadratowy): <br>
+* Linear Regression (lm): `r min(fitLM$results$RMSE)` <br>
+* Linear Regression with Forward Selection (leapForward): `r min(fitLF$results$RMSE)` <br>
+* Least angle regression (lars): `r min(fitLARS$results$RMSE)` <br>
+
+# Analiza modelu
+```{r regressor_rating, echo=FALSE}
+varImp(fitLM, cuts=10)
+```
+Model regresji potwierdzi³, ¿e najbardziej istotnym atrybutem jest nas³onecznienie, nastêpnie wilgotnoœæ. Co ciekawe wœród mniej istotnych atrybutów, które mogê mieæ wp³yw na produkcjê energii (azymut, zachmurzenie) znalaz³ siê atrybut rok. Dalej wymienione atrybuty s¹ znacznie mniej istotne w predykcji wyprodukowanej energii.
